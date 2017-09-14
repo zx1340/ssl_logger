@@ -41,16 +41,24 @@ import signal
 import socket
 import struct
 import time
-
 import frida
+from termcolor import colored
+from htmlparse import *
 
-try:
-  import hexdump  # pylint: disable=g-import-not-at-top
-except ImportError:
-  pass
-
+dumplen = 16
 
 _FRIDA_SCRIPT = """
+  
+  function toHexString(byteArray) {
+    //ret = '';
+    //for (i = 0 ; i < byteArray.length(); i++){
+     // ret += ('0' + (byte & 0xFF).toString(16)).slice(-2);
+    //}
+    return 123;
+  }
+
+
+
   /**
    * Initializes 'addresses' dictionary and NativeFunctions.
    */
@@ -158,10 +166,13 @@ _FRIDA_SCRIPT = """
       }
       message[src_dst[i] + "_port"] = ntohs(Memory.readU16(addr.add(2)));
       message[src_dst[i] + "_addr"] = ntohl(Memory.readU32(addr.add(4)));
+     
     }
 
     return message;
   }
+
+
 
   /**
    * Get the session_id of SSL object and return it as a hex string.
@@ -214,21 +225,51 @@ _FRIDA_SCRIPT = """
     }
   });
 
-  Interceptor.attach(addresses["SSL_write"],
-  {
-    onEnter: function (args)
-    {
-      var message = getPortsAndAddresses(SSL_get_fd(args[0]), false);
-      message["ssl_session_id"] = getSslSessionId(args[0]);
-      message["function"] = "SSL_write";
-      send(message, Memory.readByteArray(args[1], parseInt(args[2])));
-    },
 
-    onLeave: function (retval)
+"""
+  
+def create_ssl_write(check_pass = '[]',write_pass = '[]'):
+
+  return  """
+    Interceptor.attach(addresses["SSL_write"],
     {
-    }
-  });
-  """
+      onEnter: function (args)
+      {
+        var message = getPortsAndAddresses(SSL_get_fd(args[0]), false);
+        message["ssl_session_id"] = getSslSessionId(args[0]);
+        message["function"] = "SSL_write";
+
+        send_byte_array =  Memory.readByteArray(args[1], parseInt(args[2]));
+        
+        check_pass = %s;
+        write_pass = %s;
+
+        if (check_pass.length){
+          
+
+          bstr = String.fromCharCode.apply(null, new Uint8Array(send_byte_array));
+          
+          checkstr = String.fromCharCode.apply(null, new Uint8Array(check_pass));
+
+
+          if (bstr.indexOf(checkstr) !== -1  ){
+            
+            location = parseInt(args[1]) + bstr.indexOf(checkstr);
+            Memory.writeByteArray(ptr(location),write_pass);
+
+          }
+
+        }
+
+        send(message, Memory.readByteArray(args[1], parseInt(args[2])));
+        
+      },
+
+      onLeave: function (retval)
+      {
+      }
+    });
+    """ % (check_pass,write_pass)
 
 
 # ssl_session[<SSL_SESSION id>] = (<bytes sent by client>,
@@ -236,7 +277,7 @@ _FRIDA_SCRIPT = """
 ssl_sessions = {}
 
 
-def ssl_log(process, pcap=None, verbose=False):
+def ssl_log(process, pcap=None, verbose=False,port = None,remote = False,replace= None):
   """Decrypts and logs a process's SSL traffic.
 
   Hooks the functions SSL_read() and SSL_write() in a given process and logs
@@ -316,7 +357,7 @@ def ssl_log(process, pcap=None, verbose=False):
       client_sent += len(data)
     ssl_sessions[ssl_session_id] = (client_sent, server_sent)
 
-  def on_message(message, data):
+  def on_message(message, data = None):
     """Callback for errors and messages sent from Frida-injected JavaScript.
 
     Logs captured packet data received from JavaScript to the console and/or a
@@ -328,6 +369,8 @@ def ssl_log(process, pcap=None, verbose=False):
           dependent on message type.
       data: The string of captured decrypted data.
     """
+    #print message
+
     if message["type"] == "error":
       pprint.pprint(message)
       os.kill(os.getpid(), signal.SIGTERM)
@@ -335,25 +378,55 @@ def ssl_log(process, pcap=None, verbose=False):
     if len(data) == 0:
       return
     p = message["payload"]
+    
     if verbose:
       src_addr = socket.inet_ntop(socket.AF_INET,
                                   struct.pack(">I", p["src_addr"]))
       dst_addr = socket.inet_ntop(socket.AF_INET,
                                   struct.pack(">I", p["dst_addr"]))
+      
       print "SSL Session: " + p["ssl_session_id"]
+      
       print "[%s] %s:%d --> %s:%d" % (
           p["function"],
           src_addr,
           p["src_port"],
           dst_addr,
           p["dst_port"])
-      hexdump.hexdump(data)
-      print
-    if pcap:
-      log_pcap(pcap_file, p["ssl_session_id"], p["function"], p["src_addr"],
-               p["src_port"], p["dst_addr"], p["dst_port"], data)
+     
+      if port:
+        if p['src_port'] == int(port) or p['dst_port'] == int(port):
+          show = True
+        else:
+          show = False
+      else:
+        show = True
 
-  session = frida.attach(process)
+      if show ==True:
+        if data.startswith("POST") or data.startswith("HTTP") or data.startswith("GET") or data.startswith("HEAD"):
+          if p["function"] == "SSL_write":
+            print colored(data,'green')
+          else:
+            print colored(data,'yellow')
+        else:
+          if p["function"] == "SSL_write":
+            print colored(get_str(data),'green')
+          else:
+            print colored(get_str(data),'yellow')
+      print
+
+
+
+  if remote:
+    try:
+      session = frida.get_remote_device().attach(process)
+
+    except:
+      session = frida.get_usb_device().attach(process)
+  else:
+    session = frida.attach(process)
+
+
 
   if pcap:
     pcap_file = open(pcap, "wb", 0)
@@ -367,7 +440,15 @@ def ssl_log(process, pcap=None, verbose=False):
         ("=I", 228)):           # Data link type (LINKTYPE_IPV4)
       pcap_file.write(struct.pack(writes[0], writes[1]))
 
-  script = session.create_script(_FRIDA_SCRIPT)
+
+  if replace:
+    check_str =[int('0x' + replace[0][i:i+2],16) for i in range(0,len(replace[0]), 2)]
+    replace_str = [int('0x' + replace[1][i:i+2],16) for i in range(0,len(replace[1]), 2)]
+
+    script = session.create_script(_FRIDA_SCRIPT + create_ssl_write(check_str,replace_str))
+  else:
+    script = session.create_script(_FRIDA_SCRIPT + create_ssl_write())
+
   script.on("message", on_message)
   script.load()
 
@@ -380,6 +461,49 @@ def ssl_log(process, pcap=None, verbose=False):
   session.detach()
   if pcap:
     pcap_file.close()
+
+
+import re
+
+chars = r"A-Za-z0-9/\-:.,_$%'()[\]<> "
+shortest_run = 4
+
+regexp = '[%s]{%d,}' % (chars, shortest_run)
+pattern = re.compile(regexp)
+
+def process(stream):
+    
+    return pattern.findall(stream)
+
+def get_str(data):
+    if len(data) < 160:
+      return hexdump(data)
+    ret = '[binary]'
+    for found_str in process(data):
+        ret += found_str + '\t:'
+    return ret
+
+
+def hexdump(src, sep='.'):
+  # if printmode == 'text' or full_capture == False:
+  #     return src
+  if src[0:4] == 'POST' or src[0:3] == 'GET':
+      return src
+
+  length = dumplen
+  FILTER = ''.join(
+      [(len(repr(chr(x))) == 3) and chr(x) or sep for x in range(256)])
+  lines = []
+  for c in xrange(0, len(src), length):
+      chars = src[c:c + length]
+      hex = ' '.join(['%02x' % ord(x) for x in chars])
+      # if len(hex) > 24:
+      #    hex = '%s %s' % (hex[:24], hex[24:])
+      printable = ''.join(
+          ['%s' % ((ord(x) <= 127 and FILTER[ord(x)]) or sep) for x in chars])
+      lines.append('%08x:  %-*s  %s\n' % (c, length * 3, hex, printable))
+  return ''.join(lines)
+
 
 
 if __name__ == "__main__":
@@ -403,7 +527,9 @@ if __name__ == "__main__":
 Examples:
   %(prog)s -pcap ssl.pcap openssl
   %(prog)s -verbose 31337
-  %(prog)s -pcap log.pcap -verbose wget
+  %(prog)s -port 443
+  %(prog)s -pcap log.pcap -verbose -remote com.zing.zalo
+  %(prog)s -pcap log.pcap -verbose -remote com.zing.zalo -replace 41424344 41424343
 """)
 
   args = parser.add_argument_group("Arguments")
@@ -411,9 +537,15 @@ Examples:
                     help="Name of PCAP file to write")
   args.add_argument("-verbose", required=False, action="store_const",
                     const=True, help="Show verbose output")
+  args.add_argument("-port",metavar="<port>", required=False,
+                   help="Filter port")
+  args.add_argument("-remote", required=False, action="store_const",
+                    const=True, help="Attach a remote process")
+  args.add_argument("-replace", nargs=2,
+                    help="replace dat before encrypt") 
   args.add_argument("process", metavar="<process name | process id>",
                     help="Process whose SSL calls to log")
   parsed = parser.parse_args()
 
   ssl_log(int(parsed.process) if parsed.process.isdigit() else parsed.process,
-          parsed.pcap, parsed.verbose)
+          parsed.pcap, parsed.verbose, parsed.port,parsed.remote,parsed.replace)
