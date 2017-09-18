@@ -6,19 +6,22 @@ The functionality offered by *ssl_logger* is intended to mimic [Echo Mirage](htt
 
 ## Basic Usage
 
-`python ssl_logger.py [-pcap <path>] [-verbose] <process name | process id>`
+`python ssl_logger.py [-pcap <path>] [-verbose] [-remote] <process name | process id> -replace <hexstring> <hexstring>`
 
 Arguments:
 
-    -pcap <path>                 Name of PCAP file to write
-    -verbose                     Show verbose output
-    <process name | process id>  Process whose SSL calls to log
+    -pcap <path>                        Name of PCAP file to write
+    -verbose                            Show verbose output
+    -remote                             ....
+    -replace <hexstring> <hexstring>    replace send data                
+    <process name | process id>         Process whose SSL calls to log
 
 Examples:
 
     ssl_logger.py -pcap ssl.pcap openssl
     ssl_logger.py -verbose 31337
     ssl_logger.py -pcap log.pcap -verbose wget
+    ssl_logger.py -verbose -remote com.zing.vn -replace 41414141 42424242
 
 ## Full Example
 
