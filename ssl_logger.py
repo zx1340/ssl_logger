@@ -43,7 +43,6 @@ import struct
 import time
 import frida
 from termcolor import colored
-from htmlparse import *
 
 dumplen = 16
 
