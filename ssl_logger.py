@@ -42,6 +42,8 @@ import socket
 import struct
 import time
 import frida
+import zlib 
+
 from termcolor import colored
 
 dumplen = 16
@@ -270,7 +272,10 @@ def create_ssl_write(check_pass = '[]',write_pass = '[]'):
     });
     """ % (check_pass,write_pass)
 
-
+def parse_gzip(data):
+	gzip_data = data.split('\r\n\r\n')[1] 
+	return data.split('\r\n\r\n')[0] +'\r\n\r\n'+ zlib.decompress(gzip_data,16+zlib.MAX_WBITS)
+	
 # ssl_session[<SSL_SESSION id>] = (<bytes sent by client>,
 #                                  <bytes sent by server>)
 ssl_sessions = {}
@@ -396,7 +401,7 @@ def ssl_log(process, pcap=None, verbose=False,port = None,remote = False,replace
       if port:
         if p['src_port'] == int(port) or p['dst_port'] == int(port):
           show = True
-        else:
+        else: 
           show = False
       else:
         show = True
@@ -406,22 +411,37 @@ def ssl_log(process, pcap=None, verbose=False,port = None,remote = False,replace
           if p["function"] == "SSL_write":
             print colored(data,'green')
           else:
-            print colored(data,'yellow')
+            if 'gzip' in data:
+              print colored(parse_gzip(data),'red')
+            else:
+              print colored(data,'yellow')
         else:
           if p["function"] == "SSL_write":
             print colored(get_str(data),'green')
           else:
-            print colored(get_str(data),'yellow')
+            if 'gzip' in data:
+              print colored(parse_gzip(data),'red')
+            else:
+              print colored(get_str(data),'yellow')
       print
-
-
 
   if remote:
     try:
       session = frida.get_remote_device().attach(process)
 
     except:
-      session = frida.get_usb_device().attach(process)
+      device= frida.get_usb_device()
+      pid = device.spawn([process])
+      print("Spawn pid" + str(pid))
+      session = device.attach(pid)
+      #session = frida.get_usb_device().attach(process)
+      script = session.create_script(_FRIDA_SCRIPT + create_ssl_write())
+      script.on('message', on_message)
+      script.load()
+      print("Sleep 1 sec (default) for loading script")
+      time.sleep(1)
+      print("Resume process")
+      device.resume(pid)
   else:
     session = frida.attach(process)
 
@@ -440,16 +460,16 @@ def ssl_log(process, pcap=None, verbose=False,port = None,remote = False,replace
       pcap_file.write(struct.pack(writes[0], writes[1]))
 
 
-  if replace:
-    check_str =[int('0x' + replace[0][i:i+2],16) for i in range(0,len(replace[0]), 2)]
-    replace_str = [int('0x' + replace[1][i:i+2],16) for i in range(0,len(replace[1]), 2)]
+  # if replace:
+  #   check_str =[int('0x' + replace[0][i:i+2],16) for i in range(0,len(replace[0]), 2)]
+  #   replace_str = [int('0x' + replace[1][i:i+2],16) for i in range(0,len(replace[1]), 2)]
 
-    script = session.create_script(_FRIDA_SCRIPT + create_ssl_write(check_str,replace_str))
-  else:
-    script = session.create_script(_FRIDA_SCRIPT + create_ssl_write())
+  #   script = session.create_script(_FRIDA_SCRIPT + create_ssl_write(check_str,replace_str))
+  # else:
+  #   script = session.create_script(_FRIDA_SCRIPT + create_ssl_write())
 
-  script.on("message", on_message)
-  script.load()
+  # script.on("message", on_message)
+  # script.load()
 
   print "Press Ctrl+C to stop logging."
   try:
